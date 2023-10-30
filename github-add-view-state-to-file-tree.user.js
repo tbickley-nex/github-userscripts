@@ -12,26 +12,94 @@
 (function() {
     'use strict';
 
-    const datasetPrefix = 'ghvsft'; // GitHub View-State File Tree
+    const namespace = 'ghvsft'; // GitHub View-State File Tree
+
+    const CHECK_STATE_UNCHECKED = 0;
+    const CHECK_STATE_PARTIAL = 0.5;
+    const CHECK_STATE_CHECKED = 1;
+
+    class FileInfo {
+        constructor(parentDirectoryId, checkboxId, checked) {
+            this.parentDirectoryId = parentDirectoryId;
+            this.checkboxId = checkboxId;
+            this.checked = checked;
+        }
+
+        getCheckState() {
+            return this.checked ? CHECK_STATE_CHECKED : CHECK_STATE_UNCHECKED;
+        }
+    }
+
+    class DirectoryInfo {
+        constructor(parentDirectoryId, checkboxId) {
+            this.parentDirectoryId = parentDirectoryId;
+            this.checkboxId = checkboxId;
+            this.checkState = CHECK_STATE_CHECKED;
+            this.childCheckStateTotal = 0;
+            this.totalChildCount = 0;
+            this.directoryChildIds = [];
+            this.fileChildIds = [];
+        }
+
+        getCheckState() {
+            return this.checkState;
+        }
+        
+        addChildFile(fileId, checked) {
+            this.childCheckStateTotal += checked ? 1 : 0;
+            this.totalChildCount++;
+            this.fileChildIds.push(fileId);
+
+            this.refreshCheckState();
+        }
+
+        addChildDirectory(directoryId, checkState) {
+            this.childCheckStateTotal += checkState;
+            this.totalChildCount++;
+            this.directoryChildIds.push(directoryId);
+        }
+
+        onChildCheckStateUpdate(oldCheckState, newCheckState) {
+            this.childCheckStateTotal -= oldCheckState;
+            this.childCheckStateTotal += newCheckState;
+
+            this.refreshCheckState();
+        }
+
+        refreshCheckState() {
+            const oldCheckState = this.checkState;
+            this.checkState = this.childCheckStateTotal === this.totalChildCount
+                ? CHECK_STATE_CHECKED
+                : (
+                    this.childCheckStateTotal === 0
+                    ? CHECK_STATE_UNCHECKED
+                    : CHECK_STATE_PARTIAL
+                );
+
+            if (this.checkState !== oldCheckState) {
+                const checkbox = document.getElementById(this.checkboxId);
+                if (this.checkState === CHECK_STATE_CHECKED) {
+                    checkbox.checked = true;
+                    checkbox.classList.remove(namespace + '-partial');
+                } else if (this.checkState === CHECK_STATE_UNCHECKED) {
+                    checkbox.checked = false;
+                    checkbox.classList.remove(namespace + '-partial');
+                } else if (this.checkState === CHECK_STATE_PARTIAL) {
+                    // Partial is unchecked, because the action for clicking it should be to set it to 'checked'
+                    checkbox.checked = false;
+                    checkbox.classList.add(namespace + '-partial');
+                }
+
+                // Notify parent
+                if (this.parentDirectoryId) {
+                    directoryInfoMap[this.parentDirectoryId].onChildCheckStateUpdate(oldCheckState, this.checkState);
+                }
+            }
+        }
+    }
 
     let currentPrId = null;
-    /*
-     * [fileId] => {
-     *    parentDirectoryId: string,
-     *    checkedBoxId: string,
-     *    checked: boolean,
-     * }
-     */
     let fileInfoMap = {};
-    /*
-     * [directoryId] => {
-     *    parentDirectoryId: string,
-     *    checkedBoxId: string,
-     *    checked: boolean,
-     *    directoryChildIds: string[],
-     *    fileChildIds: string[],
-     * }
-     */
     let directoryInfoMap = {};
 
     let directoryIdIndex = 0;
@@ -83,13 +151,7 @@
         const checkboxId = 'checkbox-root';
 
         // Initialise info
-        directoryInfoMap['root'] = {
-            parentDirectoryId: null,
-            checkboxId: checkboxId,
-            checked: true,
-            directoryChildIds: [],
-            fileChildIds: [],
-        };
+        directoryInfoMap['root'] = new DirectoryInfo(null, checkboxId);
 
         // Update DOM
         const hr = document.createElement('hr');
@@ -124,16 +186,10 @@
         const checkboxId = 'checkbox-directory-' + directoryId;
 
         // Initialise info
-        directoryInfoMap[directoryId] = {
-            parentDirectoryId: parentDirectoryId,
-            checkboxId: checkboxId,
-            checked: true,
-            directoryChildIds: [],
-            fileChildIds: [],
-        };
+        directoryInfoMap[directoryId] = new DirectoryInfo(parentDirectoryId, checkboxId);
 
         if (parentDirectoryId) {
-            directoryInfoMap[parentDirectoryId].directoryChildIds.push(directoryId);
+            directoryInfoMap[parentDirectoryId].addChildDirectory(directoryId, true);
         }
 
         // Update DOM
@@ -143,7 +199,7 @@
             updateAllChildren(directoryId, checkbox.checked);
         });
 
-        fileTreeDirectory.dataset[datasetPrefix + 'DirectoryId'] = directoryId;
+        fileTreeDirectory.dataset[namespace + 'DirectoryId'] = directoryId;
         fileTreeDirectory.insertBefore(checkbox, fileTreeDirectory.firstChild);
     }
 
@@ -157,20 +213,14 @@
         const checked = fileDiff && githubCheckbox.checked;
 
         // Initialise info
-        fileInfoMap[fileId] = {
-            parentDirectoryId: parentDirectoryId,
-            checkboxId: checkboxId,
-            checked: checked,
-        };
+        fileInfoMap[fileId] = new FileInfo(
+            parentDirectoryId,
+            checkboxId,
+            checked,
+        );
 
         if (parentDirectoryId) {
-            directoryInfoMap[parentDirectoryId].fileChildIds.push(fileId);
-
-            // During initialisation, we only need to propagate unchecked inputs, because directories start checked by
-            // default
-            if (!checked) {
-                onChildCheckedUpdate(parentDirectoryId, false);
-            }
+            directoryInfoMap[parentDirectoryId].addChildFile(fileId, checked);
         }
 
         // Update DOM
@@ -194,35 +244,9 @@
         }
 
         // We need to make sure a change event occurs on the GitHub checkbox, because otherwise the state won't be persisted
-        const changeEvent = new CustomEvent("change");
+        const changeEvent = new CustomEvent("change", {bubbles: true, target: githubCheckbox});
         githubCheckbox.checked = checked;
         githubCheckbox.dispatchEvent(changeEvent);
-    }
-
-    function onChildCheckedUpdate(directoryId, checked) {
-        const directoryInfo = directoryInfoMap[directoryId];
-        if (checked) {
-            for (const fileChildId of directoryInfo.fileChildIds) {
-                if (!fileInfoMap[fileChildId].checked) {
-                    return;
-                }
-            }
-
-            for (const directoryChildId of directoryInfo.directoryChildIds) {
-                if (!directoryInfoMap[directoryChildId].checked) {
-                    return;
-                }
-            }
-        } else if (!directoryInfo.checked) {
-            return;
-        }
-
-        directoryInfo.checked = checked;
-        document.getElementById(directoryInfo.checkboxId).checked = checked;
-
-        if (directoryInfo.parentDirectoryId) {
-            onChildCheckedUpdate(directoryInfo.parentDirectoryId, checked);
-        }
     }
 
     function updateAllChildren(directoryId, checked) {
@@ -248,7 +272,7 @@
                 return 'root';
             }
             if (node.dataset.treeEntryType === 'directory') {
-                return node.dataset[datasetPrefix + 'DirectoryId'];
+                return node.dataset[namespace + 'DirectoryId'];
             }
 
             node = node.parentNode;
@@ -281,8 +305,8 @@
     function initialiseFileTree(fileTree) {
         fileTree.style.paddingLeft = '22px';
 
-        if (!fileTree.dataset[datasetPrefix + 'InitialisedRoot']) {
-            fileTree.dataset[datasetPrefix + 'InitialisedRoot'] = true;
+        if (!fileTree.dataset[namespace + 'InitialisedRoot']) {
+            fileTree.dataset[namespace + 'InitialisedRoot'] = true;
 
             initialiseRoot(fileTree);
         }
@@ -290,22 +314,22 @@
         // Initialise dirs first, so that files can be added as children
         const fileTreeDirectories = fileTree.querySelectorAll('li[data-tree-entry-type=directory]');
         for (const fileTreeDirectory of fileTreeDirectories) {
-            if (fileTreeDirectory.dataset[datasetPrefix + 'Initialised']) {
+            if (fileTreeDirectory.dataset[namespace + 'Initialised']) {
                 return;
             }
 
-            fileTreeDirectory.dataset[datasetPrefix + 'Initialised'] = true;
+            fileTreeDirectory.dataset[namespace + 'Initialised'] = true;
 
             initialiseFileTreeDirectory(fileTreeDirectory);
         }
 
         const fileTreeFiles = fileTree.querySelectorAll('li[data-tree-entry-type=file]');
         for (const fileTreeFile of fileTreeFiles) {
-            if (fileTreeFile.dataset[datasetPrefix + 'Initialised']) {
+            if (fileTreeFile.dataset[namespace + 'Initialised']) {
                 return;
             }
 
-            fileTreeFile.dataset[datasetPrefix + 'Initialised'] = true;
+            fileTreeFile.dataset[namespace + 'Initialised'] = true;
 
             initialiseFileTreeFile(fileTreeFile);
         }
@@ -319,7 +343,26 @@
     }
 
     // Re-position the selected-file indicators to avoid overlapping the new checkboxes
-    const css = '.ActionList-item.ActionList-item--navActive:not(.ActionList-item--danger)::after { left: 4px; }';
+    const css = `
+.ActionList-item.ActionList-item--navActive:not(.ActionList-item--danger)::after { 
+    left: 4px; 
+}
+
+input[type='checkbox'].${namespace}-partial {
+    appearance: none;
+    width: 13px;
+    height: 13px;
+    background: white;
+    border-radius: 2px;
+    border: solid #80b9ff 1px;
+    border-width: 5.5px 2.5px;
+    
+    ::before {
+        content: '-';
+        color: white;
+    }
+}
+`;
     injectCss(css);
 
     // There will be lots of observed mutations while the page is loading, so debounce the initialisation
@@ -355,11 +398,15 @@
         const fileInfo = fileInfoMap[fileId];
         const checked = githubCheckbox.checked;
 
+        const oldCheckState = fileInfo.getCheckState();
         fileInfo.checked = checked;
         document.getElementById(fileInfo.checkboxId).checked = checked;
 
         if (fileInfo.parentDirectoryId) {
-            onChildCheckedUpdate(fileInfo.parentDirectoryId, checked);
+            directoryInfoMap[fileInfo.parentDirectoryId].onChildCheckStateUpdate(
+                oldCheckState,
+                fileInfo.getCheckState()
+            );
         }
     });
 })();
