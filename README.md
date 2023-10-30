@@ -1,2 +1,2 @@
-# userscripts
-Userscripts created for use on the Nexus project
+# Github Userscripts
+Userscripts created to add functionality to Github
