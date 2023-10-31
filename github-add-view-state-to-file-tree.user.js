@@ -441,8 +441,23 @@ input[type='checkbox'].${namespace}-partial {
 }
 
 input[type='checkbox'].${namespace}-pending {
-    background: lightgrey;
+    animation: pending-bg 1.5s infinite;
     border: solid #767676 1px;
+}
+
+@keyframes pending-bg {
+    0% { 
+        background-color: #f6f6f6; 
+        border: solid #767676 1px;
+    }
+    50% { 
+        background-color: #80b9ff; 
+        border: solid #80b9ff 1px;
+    }
+    100% { 
+        background-color: #f6f6f6; 
+        border: solid #767676 1px;
+    }
 }
 `;
     injectCss(css);
