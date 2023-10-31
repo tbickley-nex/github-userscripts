@@ -19,14 +19,16 @@
     const CHECK_STATE_CHECKED = 1;
 
     class FileInfo {
-        constructor(parentDirectoryId, checkboxId, checked) {
+        constructor(fileId, parentDirectoryId, checkboxId, checkState) {
+            this.fileId = fileId;
             this.parentDirectoryId = parentDirectoryId;
             this.checkboxId = checkboxId;
-            this.checked = checked;
+            this.isPending = checkState === undefined;
+            this.isChecked = checkState === CHECK_STATE_CHECKED;
         }
 
         getCheckState() {
-            return this.checked ? CHECK_STATE_CHECKED : CHECK_STATE_UNCHECKED;
+            return this.isChecked ? CHECK_STATE_CHECKED : CHECK_STATE_UNCHECKED;
         }
     }
 
@@ -34,8 +36,10 @@
         constructor(parentDirectoryId, checkboxId) {
             this.parentDirectoryId = parentDirectoryId;
             this.checkboxId = checkboxId;
-            this.checkState = CHECK_STATE_CHECKED;
+            this.checkState = CHECK_STATE_UNCHECKED;
             this.childCheckStateTotal = 0;
+            this.pendingChildCount = 0;
+            this.isPending = false;
             this.totalChildCount = 0;
             this.directoryChildIds = [];
             this.fileChildIds = [];
@@ -45,11 +49,13 @@
             return this.checkState;
         }
         
-        addChildFile(fileId, checked) {
-            this.childCheckStateTotal += checked ? 1 : 0;
+        addChildFile(fileInfo) {
+            this.childCheckStateTotal += fileInfo.getCheckState();
+            this.pendingChildCount += fileInfo.isPending ? 1 : 0;
             this.totalChildCount++;
-            this.fileChildIds.push(fileId);
+            this.fileChildIds.push(fileInfo.fileId);
 
+            this.refreshIsPending();
             this.refreshCheckState();
         }
 
@@ -59,11 +65,44 @@
             this.directoryChildIds.push(directoryId);
         }
 
+        onChildIsPendingUpdate(oldIsPending, newIsPending) {
+            this.pendingChildCount -= oldIsPending ? 1 : 0;
+            this.pendingChildCount += newIsPending ? 1 : 0;
+
+            this.refreshIsPending();
+        }
+
         onChildCheckStateUpdate(oldCheckState, newCheckState) {
-            this.childCheckStateTotal -= oldCheckState;
+            if (oldCheckState === undefined) {
+                this.pendingChildCount -= 1;
+            } else {
+                this.childCheckStateTotal -= oldCheckState;
+            }
             this.childCheckStateTotal += newCheckState;
 
+            this.refreshIsPending();
             this.refreshCheckState();
+        }
+
+        refreshIsPending() {
+            const oldIsPending = this.isPending;
+            this.isPending = this.pendingChildCount !== 0;
+
+            if (this.isPending !== oldIsPending) {
+                const checkbox = document.getElementById(this.checkboxId);
+                if (this.isPending) {
+                    checkbox.disabled = true;
+                    checkbox.classList.add(namespace + '-pending');
+                } else {
+                    checkbox.disabled = false;
+                    checkbox.classList.remove(namespace + '-pending');
+                }
+
+                // Notify parent
+                if (this.parentDirectoryId) {
+                    directoryInfoMap[this.parentDirectoryId].onChildIsPendingUpdate(oldIsPending, this.isPending);
+                }
+            }
         }
 
         refreshCheckState() {
@@ -167,7 +206,7 @@
         root.style.fontStyle = 'italic';
         root.style.color = '#888';
 
-        const checkbox = createCheckbox(checkboxId, true);
+        const checkbox = createCheckbox(checkboxId, false);
 
         checkbox.addEventListener('change', function () {
             updateAllChildren('root', checkbox.checked);
@@ -189,11 +228,11 @@
         directoryInfoMap[directoryId] = new DirectoryInfo(parentDirectoryId, checkboxId);
 
         if (parentDirectoryId) {
-            directoryInfoMap[parentDirectoryId].addChildDirectory(directoryId, true);
+            directoryInfoMap[parentDirectoryId].addChildDirectory(directoryId, false);
         }
 
         // Update DOM
-        const checkbox = createCheckbox(checkboxId, true);
+        const checkbox = createCheckbox(checkboxId, false);
 
         checkbox.addEventListener('change', function () {
             updateAllChildren(directoryId, checkbox.checked);
@@ -208,23 +247,53 @@
 
         const parentDirectoryId = getParentDirectoryId(fileTreeFile);
         const checkboxId = 'checkbox-file-' + fileId;
-        const fileDiff = document.getElementById('diff-' + fileId);
-        const githubCheckbox = fileDiff.getElementsByClassName('js-reviewed-checkbox')[0];
-        const checked = fileDiff && githubCheckbox.checked;
+        const fileDiff = document.getElementById('diff-' + fileId) ?? undefined;
+        const githubCheckbox = fileDiff?.getElementsByClassName('js-reviewed-checkbox')[0];
+        const checkState = fileDiff && (githubCheckbox.checked ? CHECK_STATE_CHECKED : CHECK_STATE_UNCHECKED);
+
+        if (fileInfoMap[fileId]) {
+            const fileInfo = fileInfoMap[fileId];
+
+            // Already partially initialised - just needs checkState
+            if (checkState !== undefined) {
+                fileInfo.checkState = checkState;
+                fileInfo.isPending = false;
+
+                const checkbox = document.getElementById(checkboxId);
+                checkbox.checked = checkState === CHECK_STATE_CHECKED;
+                checkbox.disabled = false;
+                checkbox.classList.remove(namespace + '-pending');
+
+                if (fileInfo.parentDirectoryId) {
+                    directoryInfoMap[fileInfo.parentDirectoryId].onChildCheckStateUpdate(
+                        undefined,
+                        checkState
+                    );
+                }
+            }
+
+            return fileInfo;
+        }
 
         // Initialise info
-        fileInfoMap[fileId] = new FileInfo(
+        const fileInfo = new FileInfo(
+            fileId,
             parentDirectoryId,
             checkboxId,
-            checked,
+            checkState,
         );
+        fileInfoMap[fileId] = fileInfo;
 
         if (parentDirectoryId) {
-            directoryInfoMap[parentDirectoryId].addChildFile(fileId, checked);
+            directoryInfoMap[parentDirectoryId].addChildFile(fileInfo);
         }
 
         // Update DOM
-        const checkbox = createCheckbox(checkboxId, checked);
+        const checkbox = createCheckbox(checkboxId, checkState === CHECK_STATE_CHECKED);
+        if (checkState === undefined) {
+            checkbox.disabled = true;
+            checkbox.classList.add(namespace + '-pending');
+        }
 
         checkbox.addEventListener('change', function () {
             // We can't use the existing githubCheckbox const here, because GitHub sometimes creates new checkbox
@@ -236,32 +305,34 @@
         });
 
         fileTreeFile.insertBefore(checkbox, fileTreeFile.firstChild);
+
+        return fileInfo;
     }
 
-    function updateGithubCheckbox(githubCheckbox, checked) {
-        if (githubCheckbox.checked === checked) {
+    function updateGithubCheckbox(githubCheckbox, isChecked) {
+        if (githubCheckbox.checked === isChecked) {
             return;
         }
 
         // We need to make sure a change event occurs on the GitHub checkbox, because otherwise the state won't be persisted
         const changeEvent = new CustomEvent("change", {bubbles: true, target: githubCheckbox});
-        githubCheckbox.checked = checked;
+        githubCheckbox.checked = isChecked;
         githubCheckbox.dispatchEvent(changeEvent);
     }
 
-    function updateAllChildren(directoryId, checked) {
+    function updateAllChildren(directoryId, isChecked) {
         const directoryInfo = directoryInfoMap[directoryId];
 
         for (const directoryChildId of directoryInfo.directoryChildIds) {
             // We don't need to bother updating the checkbox for this directory, because it will be updated indirectly
             // by its file descendants
-            updateAllChildren(directoryChildId, checked);
+            updateAllChildren(directoryChildId, isChecked);
         }
 
         for (const fileChildId of directoryInfo.fileChildIds) {
             const fileDiff = document.getElementById('diff-' + fileChildId);
             const githubCheckbox = fileDiff.getElementsByClassName('js-reviewed-checkbox')[0];
-            updateGithubCheckbox(githubCheckbox, checked)
+            updateGithubCheckbox(githubCheckbox, isChecked)
         }
     }
 
@@ -281,7 +352,7 @@
         return null;
     }
 
-    function createCheckbox(id, checked) {
+    function createCheckbox(id, isChecked) {
         const checkbox = document.createElement('input');
 
         checkbox.setAttribute('id', id);
@@ -291,7 +362,7 @@
         checkbox.style.top = '9px';
         checkbox.style.left = '-22px';
 
-        checkbox.checked = checked;
+        checkbox.checked = isChecked;
 
         checkbox.addEventListener('click', function (event) {
             // The file checkboxes are nested inside a list item with a click handler, so this is required
@@ -315,7 +386,7 @@
         const fileTreeDirectories = fileTree.querySelectorAll('li[data-tree-entry-type=directory]');
         for (const fileTreeDirectory of fileTreeDirectories) {
             if (fileTreeDirectory.dataset[namespace + 'Initialised']) {
-                return;
+                continue;
             }
 
             fileTreeDirectory.dataset[namespace + 'Initialised'] = true;
@@ -326,12 +397,14 @@
         const fileTreeFiles = fileTree.querySelectorAll('li[data-tree-entry-type=file]');
         for (const fileTreeFile of fileTreeFiles) {
             if (fileTreeFile.dataset[namespace + 'Initialised']) {
-                return;
+                continue;
             }
 
-            fileTreeFile.dataset[namespace + 'Initialised'] = true;
+            const fileInfo = initialiseFileTreeFile(fileTreeFile);
 
-            initialiseFileTreeFile(fileTreeFile);
+            if (!fileInfo.isPending) {
+                fileTreeFile.dataset[namespace + 'Initialised'] = true;
+            }
         }
     }
 
@@ -348,12 +421,16 @@
     left: 4px; 
 }
 
-input[type='checkbox'].${namespace}-partial {
+input[type='checkbox'].${namespace}-partial,
+input[type='checkbox'].${namespace}-pending {
     appearance: none;
     width: 13px;
     height: 13px;
-    background: white;
     border-radius: 2px;
+}
+
+input[type='checkbox'].${namespace}-partial {
+    background: white;
     border: solid #80b9ff 1px;
     border-width: 5.5px 2.5px;
     
@@ -361,6 +438,11 @@ input[type='checkbox'].${namespace}-partial {
         content: '-';
         color: white;
     }
+}
+
+input[type='checkbox'].${namespace}-pending {
+    background: lightgrey;
+    border: solid #767676 1px;
 }
 `;
     injectCss(css);
@@ -396,11 +478,11 @@ input[type='checkbox'].${namespace}-partial {
         });
         const fileId = fileNode.getAttribute('id').replace('diff-', '');
         const fileInfo = fileInfoMap[fileId];
-        const checked = githubCheckbox.checked;
+        const isChecked = githubCheckbox.checked;
 
         const oldCheckState = fileInfo.getCheckState();
-        fileInfo.checked = checked;
-        document.getElementById(fileInfo.checkboxId).checked = checked;
+        fileInfo.isChecked = isChecked;
+        document.getElementById(fileInfo.checkboxId).checked = isChecked;
 
         if (fileInfo.parentDirectoryId) {
             directoryInfoMap[fileInfo.parentDirectoryId].onChildCheckStateUpdate(
