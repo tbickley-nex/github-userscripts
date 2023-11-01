@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub Add View-State to File Tree
 // @namespace    https://www.bjss.com/
-// @version      0.0.1
+// @version      0.1.0
 // @description  Adds functionality relating to the view-state to the file tree on PR files
 // @author       Thomas Bickley (thomas.bickley@ba.com)
 // @match        https://github.com/*
@@ -30,6 +30,46 @@
         getCheckState() {
             return this.isChecked ? CHECK_STATE_CHECKED : CHECK_STATE_UNCHECKED;
         }
+
+        setInitialIsChecked(isChecked) {
+            if (!this.isPending) {
+                console.warn('setInitialIsChecked called on non-pending file');
+                return;
+            }
+
+            this.isPending = false;
+            this.isChecked = isChecked;
+
+            const checkbox = this.getCheckbox();
+            checkbox.checked = isChecked;
+            checkbox.disabled = false;
+            checkbox.classList.remove(namespace + '-pending');
+
+            this.getParentDirectory()?.onChildCheckStateUpdate(undefined, this.getCheckState());
+        }
+
+        setIsChecked(isChecked) {
+            const oldCheckState = this.getCheckState();
+            this.isChecked = isChecked;
+
+            const checkbox = this.getCheckbox();
+            checkbox.checked = isChecked;
+
+            this.getParentDirectory()?.onChildCheckStateUpdate(oldCheckState, this.getCheckState());
+        }
+
+        getCheckbox() {
+            return document.getElementById(this.checkboxId);
+        }
+
+        getGitHubCheckbox() {
+            return document.getElementById('diff-' + this.fileId)
+                ?.getElementsByClassName('js-reviewed-checkbox')[0];
+        }
+
+        getParentDirectory() {
+            return directoryInfoMap[this.parentDirectoryId];
+        }
     }
 
     class DirectoryInfo {
@@ -47,6 +87,14 @@
 
         getCheckState() {
             return this.checkState;
+        }
+
+        getCheckbox() {
+            return document.getElementById(this.checkboxId);
+        }
+
+        getParentDirectory() {
+            return directoryInfoMap[this.parentDirectoryId];
         }
         
         addChildFile(fileInfo) {
@@ -89,7 +137,7 @@
             this.isPending = this.pendingChildCount !== 0;
 
             if (this.isPending !== oldIsPending) {
-                const checkbox = document.getElementById(this.checkboxId);
+                const checkbox = this.getCheckbox();
                 if (this.isPending) {
                     checkbox.disabled = true;
                     checkbox.classList.add(namespace + '-pending');
@@ -99,9 +147,7 @@
                 }
 
                 // Notify parent
-                if (this.parentDirectoryId) {
-                    directoryInfoMap[this.parentDirectoryId].onChildIsPendingUpdate(oldIsPending, this.isPending);
-                }
+                this.getParentDirectory()?.onChildIsPendingUpdate(oldIsPending, this.isPending);
             }
         }
 
@@ -116,7 +162,7 @@
                 );
 
             if (this.checkState !== oldCheckState) {
-                const checkbox = document.getElementById(this.checkboxId);
+                const checkbox = this.getCheckbox();
                 if (this.checkState === CHECK_STATE_CHECKED) {
                     checkbox.checked = true;
                     checkbox.classList.remove(namespace + '-partial');
@@ -130,14 +176,11 @@
                 }
 
                 // Notify parent
-                if (this.parentDirectoryId) {
-                    directoryInfoMap[this.parentDirectoryId].onChildCheckStateUpdate(oldCheckState, this.checkState);
-                }
+                this.getParentDirectory()?.onChildCheckStateUpdate(oldCheckState, this.checkState);
             }
         }
     }
 
-    let currentPrId = null;
     let fileInfoMap = {};
     let directoryInfoMap = {};
 
@@ -154,14 +197,6 @@
         styleNode.textContent = css;
 
         document.head.appendChild(styleNode);
-    }
-
-    function debounce(func, timeout = 500){
-        let timer;
-        return (...args) => {
-            clearTimeout(timer);
-            timer = setTimeout(() => { func.apply(this, args); }, timeout);
-        };
     }
 
     function closestAncestor(node, func) {
@@ -251,30 +286,6 @@
         const githubCheckbox = fileDiff?.getElementsByClassName('js-reviewed-checkbox')[0];
         const checkState = fileDiff && (githubCheckbox.checked ? CHECK_STATE_CHECKED : CHECK_STATE_UNCHECKED);
 
-        if (fileInfoMap[fileId]) {
-            const fileInfo = fileInfoMap[fileId];
-
-            // Already partially initialised - just needs checkState
-            if (checkState !== undefined) {
-                fileInfo.checkState = checkState;
-                fileInfo.isPending = false;
-
-                const checkbox = document.getElementById(checkboxId);
-                checkbox.checked = checkState === CHECK_STATE_CHECKED;
-                checkbox.disabled = false;
-                checkbox.classList.remove(namespace + '-pending');
-
-                if (fileInfo.parentDirectoryId) {
-                    directoryInfoMap[fileInfo.parentDirectoryId].onChildCheckStateUpdate(
-                        undefined,
-                        checkState
-                    );
-                }
-            }
-
-            return fileInfo;
-        }
-
         // Initialise info
         const fileInfo = new FileInfo(
             fileId,
@@ -295,18 +306,15 @@
             checkbox.classList.add(namespace + '-pending');
         }
 
+        if (fileDiff) {
+            addChangeListenerToGithubCheckbox(fileDiff, fileId);
+        }
+
         checkbox.addEventListener('change', function () {
-            // We can't use the existing githubCheckbox const here, because GitHub sometimes creates new checkbox
-            // elements for some reason
-            updateGithubCheckbox(
-                fileDiff.getElementsByClassName('js-reviewed-checkbox')[0],
-                checkbox.checked
-            );
+            updateGithubCheckbox(fileInfo.getGitHubCheckbox(), checkbox.checked);
         });
 
         fileTreeFile.insertBefore(checkbox, fileTreeFile.firstChild);
-
-        return fileInfo;
     }
 
     function updateGithubCheckbox(githubCheckbox, isChecked) {
@@ -400,19 +408,43 @@
                 continue;
             }
 
-            const fileInfo = initialiseFileTreeFile(fileTreeFile);
+            fileTreeFile.dataset[namespace + 'Initialised'] = true;
 
-            if (!fileInfo.isPending) {
-                fileTreeFile.dataset[namespace + 'Initialised'] = true;
-            }
+            initialiseFileTreeFile(fileTreeFile);
         }
     }
 
-    function initialiseFileTrees() {
-        const fileTrees = document.querySelectorAll('file-tree');
+    // Called when the Userscript loads, by which time the page will already have loaded
+    function initialiseExistingContent(root) {
+        const fileTrees = root.querySelectorAll('file-tree');
         for (const fileTree of fileTrees) {
             initialiseFileTree(fileTree);
         }
+    }
+
+    function onFileViewedFormLoaded(formEl) {
+        const fileNode = closestAncestor(formEl, function (node) {
+            return node.dataset && node.dataset.detailsContainerGroup === 'file';
+        });
+        const fileId = fileNode.getAttribute('id').replace('diff-', '');
+
+        addChangeListenerToGithubCheckbox(formEl, fileId);
+    }
+
+    function addChangeListenerToGithubCheckbox(containerEl, fileId = undefined) {
+        const gitHubCheckbox = containerEl.querySelector('input[type=checkbox]');
+        gitHubCheckbox.addEventListener('change', () => {
+            fileInfoMap[fileId].setIsChecked(gitHubCheckbox.checked);
+        });
+    }
+
+    function onFileDiffLoaded(fileDiffEl) {
+        const fileId = fileDiffEl.id.replace('diff-', '');
+        const githubCheckbox = fileDiffEl?.getElementsByClassName('js-reviewed-checkbox')[0];
+
+        fileInfoMap[fileId].setInitialIsChecked(githubCheckbox.checked);
+
+        addChangeListenerToGithubCheckbox(fileDiffEl, fileId);
     }
 
     // Re-position the selected-file indicators to avoid overlapping the new checkboxes
@@ -426,13 +458,13 @@ input[type='checkbox'].${namespace}-pending {
     appearance: none;
     width: 13px;
     height: 13px;
-    border-radius: 2px;
 }
 
-input[type='checkbox'].${namespace}-partial {
+input[type='checkbox'].${namespace}-partial:not(.${namespace}-pending) {
     background: white;
     border: solid #80b9ff 1px;
     border-width: 5.5px 2.5px;
+    border-radius: 2px;
     
     ::before {
         content: '-';
@@ -441,69 +473,76 @@ input[type='checkbox'].${namespace}-partial {
 }
 
 input[type='checkbox'].${namespace}-pending {
-    animation: pending-bg 1.5s infinite;
-    border: solid #767676 1px;
+    display: inline-block;
 }
 
-@keyframes pending-bg {
-    0% { 
-        background-color: #f6f6f6; 
-        border: solid #767676 1px;
-    }
-    50% { 
-        background-color: #80b9ff; 
-        border: solid #80b9ff 1px;
-    }
-    100% { 
-        background-color: #f6f6f6; 
-        border: solid #767676 1px;
-    }
+input[type='checkbox'].${namespace}-pending:after {
+    content: " ";
+    display: block;
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    border: 2px solid #80b9ff;
+    border-right-color: transparent;
+    animation: spin 1.2s linear infinite;
 }
+
+@keyframes spin {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
 `;
     injectCss(css);
 
-    // There will be lots of observed mutations while the page is loading, so debounce the initialisation
-    const debouncedInitialiseFileTrees = debounce(initialiseFileTrees);
+    let currentPrId = getPrId();
+    if (currentPrId) {
+        initialiseExistingContent(document);
+    }
 
-    let observer = new MutationObserver(function() {
+    let observer = new MutationObserver(function(mutations) {
         const oldPrId = currentPrId;
         currentPrId = getPrId();
+
+        if (!currentPrId) {
+            return;
+        }
 
         if (oldPrId !== currentPrId) {
             resetState();
         }
 
-        if (currentPrId) {
-            debouncedInitialiseFileTrees();
+        for (const mutation of mutations) {
+            if (mutation.target.classList.contains('js-diff-progressive-container')) {
+                // File diff has been loaded, which allows us to set the check-state for the file
+                for (const addedNode of mutation.addedNodes) {
+                    if (addedNode.tagName === 'DIV' && addedNode.id.startsWith('diff-')) {
+                        onFileDiffLoaded(addedNode)
+                    }
+                }
+            } else if (mutation.target.parentElement?.classList.contains('file-actions')) {
+                // The 'viewed' checkbox is destroyed and recreated whenever the file diff is collapsed/expanded
+                for (const addedNode of mutation.addedNodes) {
+                    // Only check elements that don't have the 'display: none' class
+                    if (addedNode.nodeType === Node.ELEMENT_NODE) {
+                        onFileViewedFormLoaded(addedNode);
+                    }
+                }
+            } else if (mutation.target.id === 'repo-content-turbo-frame') {
+                // The user has navigated into the 'files' tab, causing the file-tree to be loaded
+                for (const addedNode of mutation.addedNodes) {
+                    // Only check elements that don't have the 'display: none' class
+                    if (addedNode.nodeType === Node.ELEMENT_NODE && !addedNode.classList.contains('d-none')) {
+                        initialiseExistingContent(addedNode);
+                    }
+                }
+            }
         }
     })
 
     observer.observe(document, {attributes: false, childList: true, characterData: false, subtree:true});
-
-    // For some reason GitHub creates a new 'viewed' checkbox after the first time you click it, so instead of us being able to
-    // just attach a listener to the appropriate elements during initialisation we have to listen for them at a document level
-    document.addEventListener('change', function(event) {
-        const githubCheckbox = event.target;
-        if (!githubCheckbox || !githubCheckbox.classList.contains('js-reviewed-checkbox')) {
-            return;
-        }
-
-        const fileNode = closestAncestor(githubCheckbox, function (node) {
-            return node.dataset && node.dataset.detailsContainerGroup === 'file';
-        });
-        const fileId = fileNode.getAttribute('id').replace('diff-', '');
-        const fileInfo = fileInfoMap[fileId];
-        const isChecked = githubCheckbox.checked;
-
-        const oldCheckState = fileInfo.getCheckState();
-        fileInfo.isChecked = isChecked;
-        document.getElementById(fileInfo.checkboxId).checked = isChecked;
-
-        if (fileInfo.parentDirectoryId) {
-            directoryInfoMap[fileInfo.parentDirectoryId].onChildCheckStateUpdate(
-                oldCheckState,
-                fileInfo.getCheckState()
-            );
-        }
-    });
 })();
