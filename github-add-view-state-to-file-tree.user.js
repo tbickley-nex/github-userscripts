@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub Add View-State to File Tree
 // @namespace    https://www.bjss.com/
-// @version      0.1.0
+// @version      0.1.1
 // @description  Adds functionality relating to the view-state to the file tree on PR files
 // @author       Thomas Bickley (thomas.bickley@ba.com)
 // @match        https://github.com/*
@@ -540,9 +540,13 @@ input[type='checkbox'].${namespace}-pending:after {
                         initialiseExistingContent(addedNode);
                     }
                 }
+            } else if (mutation.target.tagName === 'BODY') {
+                // The user has reloaded the page contents by clicking the 'refresh' button on a PR with changes
+                resetState();
+                initialiseExistingContent(mutation.target);
             }
         }
-    })
+    });
 
     observer.observe(document, {attributes: false, childList: true, characterData: false, subtree:true});
 })();
